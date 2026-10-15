@@ -86,39 +86,64 @@ const promptSchema = new mongoose.Schema({
 });
 export const PromptModel = mongoose.model('BroadcastPrompt', promptSchema);
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+const app = express();
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-  app.use(cors());
-  app.use(express.json());
+app.use(cors());
+app.use(express.json());
 
-  // Initialize Gemini AI Client
-  const geminiApiKey = process.env.GEMINI_API_KEY;
-  let ai: GoogleGenAI | null = null;
-  if (geminiApiKey) {
-    ai = new GoogleGenAI({ apiKey: geminiApiKey });
-    console.log("Google Gen AI client initialized.");
-  } else {
-    console.warn("GEMINI_API_KEY is missing. AI Agent features will fail.");
-  }
+// Initialize Gemini AI Client
+const geminiApiKey = process.env.GEMINI_API_KEY;
+let ai: GoogleGenAI | null = null;
+if (geminiApiKey) {
+  ai = new GoogleGenAI({ apiKey: geminiApiKey });
+  console.log("Google Gen AI client initialized.");
+} else {
+  console.warn("GEMINI_API_KEY is missing. AI Agent features will fail.");
+}
 
-  // Connect to MongoDB
+// Connect to MongoDB with serverless connection reuse
+let isConnecting = false;
+async function ensureDbConnected() {
+  if (mongoose.connection.readyState >= 1) return;
   const mongoURI = process.env.MONGODB_URI;
   if (!mongoURI) {
     console.error("MONGODB_URI environment variable is missing.");
-    // We don't crash unconditionally, to allow UI to guide the user to add it if missing,
-    // but without URI, endpoints will fail.
-  } else {
+    return;
+  }
+  if (!isConnecting) {
+    isConnecting = true;
     try {
       await mongoose.connect(mongoURI);
       console.log("Connected to MongoDB successfully");
     } catch (err) {
       console.error("Failed to connect to MongoDB", err);
+    } finally {
+      isConnecting = false;
     }
   }
+}
 
-  // --- API Routes ---
+// Initial connection attempt
+ensureDbConnected();
+
+// Middleware to ensure DB connection is ready in serverless environments
+app.use(async (req, res, next) => {
+  await ensureDbConnected();
+  next();
+});
+
+// Health check endpoint
+app.get("/api/health", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "backend",
+    dbReady: mongoose.connection.readyState >= 1,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// --- API Routes ---
 
   // Users
   app.get("/api/users", async (req, res) => {
@@ -383,8 +408,8 @@ async function startServer() {
   });
 
 
-  // Serve static files in production
-  if (process.env.NODE_ENV === "production") {
+  // Serve static files in standalone production (non-Vercel environments)
+  if (process.env.NODE_ENV === "production" && !process.env.VERCEL) {
     const distPath = path.join(process.cwd(), '../frontend/dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
@@ -392,9 +417,10 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
-  });
-}
+  if (!process.env.VERCEL) {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://0.0.0.0:${PORT}`);
+    });
+  }
 
-startServer();
+  export default app;
